@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  Cloudformation template for milliseconds converter application. This app runs on application load balancer. In addition, it is observed by Autoscaling Group
+  
+Resources:
+  ALBSecurityGroup: #application load balancer , we use default vpc, onl ingress is enough becaue statefull. 
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:  Enable HTTP for ALB
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+  
+  WebServerSecurityGroup:   # only listening from albsecuritygroup, because of that we write (albsg_id or name >> according to doc. of aws )
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP for App from ALB
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !GetAtt ALBSecurityGroup.GroupId
+  
+  WebServerLaunchTemplate: # this part of ec2 ex. placementgroup more connect each others. in this group have 3 condition together stop and start. but faster 
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData: 
+        ImageId: ami-04823729c75214919
+        InstanceType: t2.micro
+        KeyName: rukiyekey
+        SecurityGroupIds: 
+          - !GetAtt WebServerSecurityGroup.GroupId
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub Web Server of ${AWS::StackName} #entribute pull we use sub
+        UserData: #we use token for private repo from github
+          Fn::Base64: 
+            !Sub |
+              #! /bin/bash
+              yum update -y
+              yum install python3 -y
+              pip3 install flask
+              TOKEN="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" 
+              FOLDER="https://$TOKEN@raw.githubusercontent.com/kadirsalvarci/sap-project/main/002-milliseconds-converter" 
+              curl -s --create-dirs -o "/home/ec2-user/templates/index.html" -L "$FOLDER"templates/index.html
+              curl -s --create-dirs -o "/home/ec2-user/templates/result.html" -L "$FOLDER"templates/result.html
+              curl -s --create-dirs -o "/home/ec2-user/app.py" -L "$FOLDER"app.py
+              python3 /home/ec2-user/app.py
+
+
+  WebServerTargetGroup: #for load balancer, part of healthcheck default if you dont write 
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !GetAtt WebServerSecurityGroup.VpcId #we use default vpy in webserversec.group
+
+  ApplicationLoadBalancer:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      IpAddressType: ipv4
+      Scheme: internet-facing #for internet if you dont want internet--- (internal  )
+      SecurityGroups:
+        - !GetAtt ALBSecurityGroup.GroupId
+      Subnets:     #least 2 subnet for alb bur bes prac. all of them write
+        - subnet-0b98192bc3536a0b4
+        - subnet-0e919c1e7620e894e
+        - subnet-089a860f7b1b5fa01
+        - subnet-0b47672655b65ba30
+        - subnet-02775bf0d4ae5770e
+        - subnet-0a2be1163a6f5f464
+      Type: application
+
+  ALBListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions: #required
+        - TargetGroupArn: !Ref WebServerTargetGroup #we have to write list
+          Type: forward
+      LoadBalancerArn: !Ref ApplicationLoadBalancer #required
+      Port: 80 #required
+      Protocol: HTTP #required
+
+  WebServerASG:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      AvailabilityZones:
+        !GetAZs ""
+      DesiredCapacity: 2
+      HealthCheckGracePeriod: 90
+      HealthCheckType: ELB
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref WebServerLaunchTemplate
+        Version: !GetAtt WebServerLaunchTemplate.LatestVersionNumber
+      MaxSize: 3 #required
+      MinSize: 1 #required
+      TargetGroupARNs:
+        - !Ref WebServerTargetGroup
+    
+
+Outputs:
+  WebsiteURL:
+    Description: Milliseconds Converter Application Load Balancer URL
+    Value: !Sub 
+      - http://${ALBaddress}
+      - ALBaddress: !GetAtt ApplicationLoadBalancer.DNSName
